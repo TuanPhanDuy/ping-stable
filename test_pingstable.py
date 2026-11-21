@@ -75,6 +75,13 @@ def fake_run(outputs):
 
 
 class Parsing(unittest.TestCase):
+    """Parser cho output của macOS."""
+
+    def setUp(self):
+        p = mock.patch.multiple(ps, IS_WIN=False, IS_MAC=True)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_ping_stats_and_loss(self):
         with mock.patch.object(ps, "run", return_value=PING_OUT):
             s = ps.ping("1.1.1.1", count=4)
@@ -255,7 +262,12 @@ class Robustness(unittest.TestCase):
 
 
 class Safety(unittest.TestCase):
-    """Ngoài `fix`, tool chỉ được đọc, không thay đổi cấu hình mạng."""
+    """Ngoài `fix`, tool chỉ được đọc, không thay đổi cấu hình mạng (nhánh macOS)."""
+
+    def setUp(self):
+        p = mock.patch.multiple(ps, IS_WIN=False, IS_MAC=True)
+        p.start()
+        self.addCleanup(p.stop)
 
     def assert_read_only(self, calls):
         for cmd in calls:
@@ -283,10 +295,9 @@ class Safety(unittest.TestCase):
         self.assert_read_only(calls)
 
     def test_fix_refuses_without_root(self):
-        if os.geteuid() == 0:
-            self.skipTest("đang chạy bằng root")
         run, calls = fake_run({})
-        with mock.patch.object(ps, "run", run), self.assertRaises(SystemExit):
+        with mock.patch.object(ps, "run", run), mock.patch.object(ps.os, "geteuid", return_value=501, create=True), \
+                self.assertRaises(SystemExit):
             ps.cmd_fix(Namespace(revert=False))
         self.assertEqual(calls, [])
 
