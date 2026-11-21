@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: pingstable-macos-arm64
+          - os: macos-15-intel
+            asset: pingstable-macos-x64
+            optional: true
+          - os: windows-latest
+            asset: pingstable-windows-x64
+    runs-on: ${{ matrix.os }}
+    # Runner Intel có thể không còn; install.sh khi đó dùng bản pingstable.py.
+    continue-on-error: ${{ matrix.optional == true }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check tag matches __version__
+        run: |
+          v=$(python -c "import pingstable; print(pingstable.__version__)")
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "Tag $GITHUB_REF_NAME khác __version__ $v"; exit 1; }
+      - run: pip install pyinstaller==6.22.3
+      - run: pyinstaller --onefile --clean --name ${{ matrix.asset }} pingstable.py
+      - name: Smoke test binary
+        run: |
+          bin=dist/${{ matrix.asset }}
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          "$bin" --version
+          "$bin" wifi --count 2
+          "$bin" monitor --target 127.0.0.1 --duration 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp install.sh install.ps1 pingstable.py dist/
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
