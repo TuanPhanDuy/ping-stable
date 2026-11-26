@@ -2,8 +2,10 @@
 """Chẩn đoán và giảm lag khi chơi game server ở xa (vd. TFT PBE từ Việt Nam) trên macOS và Windows."""
 
 import argparse
+import ipaddress
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -11,7 +13,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 PROG = "pingstable"
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
@@ -19,6 +21,7 @@ IS_MAC = sys.platform == "darwin"
 # Riot ping endpoint của NA; PBE chạy ở cụm NA nên dùng làm mốc khi chưa bắt được IP trận thật.
 DEFAULT_TARGET = "104.160.131.3"
 RIOT_PREFIXES = ["104.160.128.0/19"]
+STATE_DIR = os.environ.get("PINGSTABLE_HOME") or os.path.join(os.path.expanduser("~"), ".pingstable")
 
 PING_RE = re.compile(r"time=([\d.]+) ms")
 # Windows dịch chữ "time" theo ngôn ngữ máy, nên neo vào "ms TTL=" vốn không đổi.
@@ -282,13 +285,39 @@ def detect_game_server():
     return ips[0] if ips else None
 
 
+def remember_target(ip):
+    """Lưu IP server game công khai để đo lại được khi đã thoát trận."""
+    try:
+        if not ipaddress.ip_address(ip).is_global:
+            return
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "last_target"), "w") as f:
+            f.write(ip)
+    except (ValueError, OSError):
+        pass
+
+
+def last_target():
+    try:
+        with open(os.path.join(STATE_DIR, "last_target")) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def resolve_target(arg):
     if arg:
+        remember_target(arg)
         return arg
     found = detect_game_server()
     if found:
         print(f"• Bắt được server trận: {found[0]}:{found[1]}")
+        remember_target(found[0])
         return found[0]
+    saved = last_target()
+    if saved:
+        print(f"• Không thấy trận đang chạy, dùng server trận gần nhất {saved}")
+        return saved
     if IS_WIN:
         print("• Windows: xem IP trận trong Resource Monitor (resmon) > Network > League of Legends.exe, "
               "rồi truyền --target <ip>.")
@@ -432,6 +461,95 @@ def cmd_relay(a):
     print(wg_client_template(host.split("@")[-1], target))
 
 
+def warp_cli():
+    if IS_WIN:
+        path = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                            "Cloudflare", "Cloudflare WARP", "warp-cli.exe")
+        if os.path.exists(path):
+            return path
+    return shutil.which("warp-cli")
+
+
+def warp_connected(cli):
+    return bool(re.search(r"\bConnected\b", run([cli, "status"], timeout=10)))
+
+
+def set_warp(cli, on, wait=20):
+    run([cli, "connect" if on else "disconnect"], timeout=15)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if warp_connected(cli) == on:
+            time.sleep(2)  # đợi route ổn định trước khi đo
+            return True
+        time.sleep(1)
+    return False
+
+
+def route_score(s):
+    """Điểm càng thấp càng tốt; jitter và mất gói gây giật nhiều hơn ping cao đều."""
+    return float("inf") if s["loss"] >= 100 else s["avg"] + 2 * s["jitter"] + 10 * s["loss"]
+
+
+def cmd_compare(a):
+    """Đo cùng một server game qua từng tuyến mạng (WARP bật/tắt, wifi nhà/4G...) rồi chọn tuyến tốt nhất."""
+    target = resolve_target(a.target)
+    count = a.seconds if IS_WIN else a.seconds * 5
+    cli = was_on = None
+    if a.warp:
+        cli = warp_cli()
+        if not cli:
+            sys.exit("Chưa cài Cloudflare WARP (miễn phí): https://one.one.one.one — cài xong chạy lại lệnh này.")
+        was_on = warp_connected(cli)
+        steps = [("Đi thẳng", False), ("Cloudflare WARP", True)]
+    else:
+        steps = [(label, None) for label in a.routes]
+
+    results = []
+    try:
+        for i, (label, warp_on) in enumerate(steps):
+            if warp_on is not None:
+                print(f"• {'Bật' if warp_on else 'Tắt'} WARP...")
+                if not set_warp(cli, warp_on):
+                    print("  Không đổi được trạng thái WARP, bỏ qua tuyến này.")
+                    continue
+            elif i > 0:
+                try:
+                    input(f"\nChuyển mạng sang '{label}' (vd. bật hotspot 4G), đợi có mạng rồi bấm Enter...")
+                except EOFError:
+                    break
+            print(f"• Đo {label} trong {a.seconds}s...")
+            s = ping(target, count)
+            print(f"  {fmt(s)}")
+            if not results and s["loss"] >= 100:
+                sys.exit(f"Server {target} không trả ping nên không so sánh được. Chạy khi đang trong trận "
+                         "(tool tự bắt và lưu IP), hoặc truyền --target <ip>.")
+            results.append((label, s))
+    finally:
+        if cli and warp_connected(cli) != was_on:
+            set_warp(cli, was_on)
+            print(f"• Đã trả WARP về trạng thái ban đầu ({'bật' if was_on else 'tắt'}).")
+
+    if len(results) < 2:
+        print("\nCần đo ít nhất 2 tuyến để so sánh.")
+        return
+    print(f"\n{'Tuyến':<18}{'avg':>7}{'p95':>7}{'jitter':>9}{'loss':>7}")
+    for label, s in results:
+        if s["loss"] >= 100:
+            print(f"{label:<18}{'không phản hồi':>30}")
+        else:
+            print(f"{label:<18}{s['avg']:>5.0f}ms{s['p95']:>5.0f}ms{s['jitter']:>7.1f}ms{s['loss']:>6.0f}%")
+    first_label, first = results[0]
+    label, best = min(results, key=lambda r: route_score(r[1]))
+    if label == first_label or route_score(first) - route_score(best) < 5:
+        print(f"\nKết luận: '{first_label}' đang tốt nhất hoặc chênh không đáng kể, giữ nguyên.")
+        return
+    print(f"\nKết luận: dùng '{label}' khi chơi: avg {first['avg'] - best['avg']:+.0f}ms → {best['avg']:.0f}ms, "
+          f"jitter {first['jitter']:.1f} → {best['jitter']:.1f}ms, loss {first['loss']:.0f}% → {best['loss']:.0f}%.")
+    if a.warp:
+        print("Bật WARP trong app 1.1.1.1 trước khi vào trận. WARP đi qua toàn bộ traffic, "
+              "tắt nếu nó xung đột với VPN công ty.")
+
+
 def wg_client_template(server, target):
     allowed = ", ".join(sorted(set(RIOT_PREFIXES + [f"{target}/32"])))
     return f"""[Interface]
@@ -472,6 +590,14 @@ def main(argv=None):
     f = sub.add_parser("fix", help="macOS: tắt awdl0 để hết spike ping trên Wi-Fi (cần sudo)")
     f.add_argument("--revert", action="store_true")
     f.set_defaults(func=cmd_fix)
+
+    c = sub.add_parser("compare", help="So sánh các tuyến mạng miễn phí (WARP, 4G...) tới server game")
+    c.add_argument("--target")
+    c.add_argument("--seconds", type=int, default=60, help="Thời gian đo mỗi tuyến")
+    c.add_argument("--warp", action="store_true", help="Tự bật/tắt Cloudflare WARP để so sánh, xong trả lại như cũ")
+    c.add_argument("--routes", nargs="+", default=["Mạng hiện tại", "Mạng thứ 2"],
+                   help="Tên các tuyến sẽ đổi tay (vd. 'Wi-Fi nhà' '4G Viettel')")
+    c.set_defaults(func=cmd_compare)
 
     r = sub.add_parser("relay", help="So sánh đi thẳng với đi qua VPS của bạn")
     r.add_argument("hosts", nargs="+", help="user@ip của VPS (cần SSH bằng key)")

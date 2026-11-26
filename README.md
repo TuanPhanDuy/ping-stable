@@ -27,8 +27,19 @@ pingstable wifi                  # sóng, nhiễu, kênh đè nhau, app ngốn m
 pingstable diagnose              # ping/jitter/mất gói tới router và server game, traceroute, kết luận
 pingstable monitor               # theo dõi ping liên tục khi đang chơi, báo spike
 sudo pingstable fix              # macOS: tắt awdl0 (AirDrop/Handoff) gây spike trên Wi-Fi; --revert để bật lại
+pingstable compare --warp        # đo đi thẳng và qua Cloudflare WARP, chọn tuyến tốt hơn, trả WARP về như cũ
+pingstable compare --routes "Wi-Fi nhà" "4G Viettel"   # đổi mạng bằng tay giữa các lượt đo
 pingstable relay root@1.2.3.4    # so sánh đi thẳng với đi qua VPS, in cấu hình WireGuard split tunnel
 ```
+
+### Giảm ping miễn phí, không cần VPS
+
+`compare` đo cùng một server game qua nhiều tuyến mạng, rồi cho biết tuyến nào ít giật nhất. Cách tính điểm ưu tiên jitter và mất gói hơn ping trung bình.
+
+- **Cloudflare WARP**: cài app 1.1.1.1 (miễn phí), rồi chạy `pingstable compare --warp`. Tool tự bật và tắt WARP để đo, xong thì trả về đúng trạng thái ban đầu, kể cả khi bị lỗi hoặc bạn bấm Ctrl+C.
+- **Nhà mạng khác**: phát 4G/5G từ điện thoại dùng nhà mạng khác với mạng nhà. Mỗi nhà mạng đi ra nước ngoài theo tuyến khác nhau.
+
+Mỗi lần bắt được IP server trận, tool lưu lại vào `~/.pingstable/last_target`. Nhờ vậy `compare` vẫn đo được sau khi đã thoát game.
 
 `diagnose` và `monitor` tự tìm IP server trận khi đang chơi (chỉ trên macOS). Trên Windows, xem IP trong Resource Monitor (`resmon`) > Network > `League of Legends.exe`, rồi truyền vào bằng `--target <ip>`.
 

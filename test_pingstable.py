@@ -4,12 +4,16 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from argparse import Namespace
 from unittest import mock
 
-import pingstable as ps
+# Tool và mọi subprocess của test ghi trạng thái vào thư mục tạm, không đụng ~/.pingstable thật.
+os.environ["PINGSTABLE_HOME"] = tempfile.mkdtemp(prefix="pingstable-test-")
+
+import pingstable as ps  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = [sys.executable, os.path.join(HERE, "pingstable.py")]
@@ -241,6 +245,120 @@ class WindowsParsing(unittest.TestCase):
                 self.assertNotRegex(cmd[-1], r"(?i)\b(Set|New|Remove|Disable|Enable)-")
 
 
+def stats(avg, jitter=1.0, loss=0.0):
+    return {"loss": loss, "min": avg, "avg": avg, "p95": avg, "max": avg, "jitter": jitter}
+
+
+class FakeWarp:
+    """warp-cli giả: ghi nhớ trạng thái bật/tắt như app thật."""
+
+    def __init__(self, on):
+        self.on = on
+        self.calls = []
+
+    def run(self, cmd, timeout=None):
+        self.calls.append(cmd)
+        if cmd[0] != "warp-cli":
+            return ""
+        if cmd[1] == "connect":
+            self.on = True
+        elif cmd[1] == "disconnect":
+            self.on = False
+        return "Status update: Connected" if self.on else "Status update: Disconnected"
+
+
+class Compare(unittest.TestCase):
+    def setUp(self):
+        for p in (mock.patch.object(ps, "warp_cli", return_value="warp-cli"),
+                  mock.patch.object(ps.time, "sleep"),
+                  mock.patch("builtins.print")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def args(self, **kw):
+        return Namespace(**{"target": "104.160.131.77", "seconds": 1, "warp": True, "routes": [], **kw})
+
+    def test_warp_status_parsing(self):
+        with mock.patch.object(ps, "run", return_value="Status update: Disconnected"):
+            self.assertFalse(ps.warp_connected("warp-cli"))
+        with mock.patch.object(ps, "run", return_value="Status update: Connected\nNetwork: healthy"):
+            self.assertTrue(ps.warp_connected("warp-cli"))
+
+    def test_warp_picks_better_route_and_restores_state(self):
+        warp = FakeWarp(on=False)
+        results = iter([stats(240, jitter=15), stats(200, jitter=3)])
+        with mock.patch.object(ps, "run", warp.run), mock.patch.object(ps, "ping", lambda *a: next(results)), \
+                mock.patch("builtins.print") as out:
+            ps.cmd_compare(self.args())
+        text = " ".join(str(c.args[0]) for c in out.call_args_list if c.args)
+        self.assertIn("dùng 'Cloudflare WARP'", text)
+        self.assertFalse(warp.on, "WARP phải được tắt lại như ban đầu")
+
+    def test_warp_restored_when_target_unreachable(self):
+        warp = FakeWarp(on=True)
+        with mock.patch.object(ps, "run", warp.run), mock.patch.object(ps, "ping", return_value={"loss": 100.0}), \
+                self.assertRaises(SystemExit):
+            ps.cmd_compare(self.args())
+        self.assertTrue(warp.on, "WARP phải được bật lại như ban đầu")
+
+    def test_warp_restored_on_ctrl_c(self):
+        warp = FakeWarp(on=False)
+        results = iter([stats(240)])
+
+        def ping(*a):
+            try:
+                return next(results)
+            except StopIteration:
+                raise KeyboardInterrupt
+        with mock.patch.object(ps, "run", warp.run), mock.patch.object(ps, "ping", ping), \
+                self.assertRaises(KeyboardInterrupt):
+            ps.cmd_compare(self.args())
+        self.assertFalse(warp.on)
+
+    def test_keeps_current_route_when_not_better(self):
+        warp = FakeWarp(on=False)
+        results = iter([stats(200), stats(202)])
+        with mock.patch.object(ps, "run", warp.run), mock.patch.object(ps, "ping", lambda *a: next(results)), \
+                mock.patch("builtins.print") as out:
+            ps.cmd_compare(self.args())
+        self.assertIn("giữ nguyên", " ".join(str(c.args[0]) for c in out.call_args_list if c.args))
+
+    def test_manual_routes_wait_for_user(self):
+        results = iter([stats(250, jitter=20, loss=3), stats(210)])
+        with mock.patch.object(ps, "run", return_value=""), mock.patch.object(ps, "ping", lambda *a: next(results)), \
+                mock.patch("builtins.input", return_value="") as ask, mock.patch("builtins.print") as out:
+            ps.cmd_compare(self.args(warp=False, routes=["Wi-Fi nhà", "4G"]))
+        self.assertEqual(ask.call_count, 1)
+        self.assertIn("dùng '4G'", " ".join(str(c.args[0]) for c in out.call_args_list if c.args))
+
+    def test_missing_warp_exits_without_side_effects(self):
+        run, calls = fake_run({})
+        with mock.patch.object(ps, "warp_cli", return_value=None), mock.patch.object(ps, "run", run), \
+                self.assertRaises(SystemExit):
+            ps.cmd_compare(self.args())
+        self.assertEqual([c for c in calls if c[0] == "warp-cli"], [])
+
+
+class RememberTarget(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(ps, "STATE_DIR", tempfile.mkdtemp())
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_saves_public_ip_only(self):
+        self.assertIsNone(ps.last_target())
+        for ip in ("127.0.0.1", "192.168.1.1", "not-an-ip"):
+            ps.remember_target(ip)
+        self.assertIsNone(ps.last_target())
+        ps.remember_target("104.160.131.77")
+        self.assertEqual(ps.last_target(), "104.160.131.77")
+
+    def test_falls_back_to_last_game_server(self):
+        ps.remember_target("104.160.131.77")
+        with mock.patch.object(ps, "detect_game_server", return_value=None), mock.patch("builtins.print"):
+            self.assertEqual(ps.resolve_target(None), "104.160.131.77")
+
+
 class Robustness(unittest.TestCase):
     """Lệnh hệ thống lỗi, thiếu hoặc trả output lạ thì tool không được crash."""
 
@@ -284,6 +402,7 @@ class Safety(unittest.TestCase):
             ps.cmd_wifi(Namespace(count=4))
         self.assertTrue(calls)
         self.assert_read_only(calls)
+        self.assertNotIn("warp-cli", [c[0] for c in calls])
 
     def test_relay_never_prompts_for_password(self):
         run, calls = fake_run({"ping": PING_OUT, "ssh": PING_OUT})
