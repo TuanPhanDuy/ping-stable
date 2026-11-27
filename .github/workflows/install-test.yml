@@ -1,0 +1,58 @@
+name: Install test
+
+# Chạy đúng lệnh cài mà người dùng chạy, với bản Release mới nhất.
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+jobs:
+  macos:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Install
+        run: curl -fsSL https://github.com/${{ github.repository }}/releases/latest/download/install.sh | sh
+      - name: Run installed binary
+        run: |
+          bin="$HOME/.local/bin/pingstable"
+          file "$bin"
+          "$bin" --version
+          "$bin" wifi --count 2
+          "$bin" monitor --target 127.0.0.1 --duration 2
+          "$bin" compare --target 127.0.0.1 --seconds 2 < /dev/null
+          grep -F '.local/bin' ~/.zshrc
+
+  windows:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        # Windows PowerShell 5.1, bản có sẵn trên máy người dùng.
+        shell: powershell
+    steps:
+      - name: Install
+        run: irm https://github.com/${{ github.repository }}/releases/latest/download/install.ps1 | iex
+      - name: Run installed binary
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = Join-Path $env:LOCALAPPDATA "pingstable"
+          $exe = Join-Path $dir "pingstable.exe"
+          & $exe --version; if ($LASTEXITCODE) { exit 1 }
+          & $exe wifi --count 2; if ($LASTEXITCODE) { exit 1 }
+          & $exe monitor --target 127.0.0.1 --duration 2; if ($LASTEXITCODE) { exit 1 }
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          if (-not (($userPath -split ";") -contains $dir)) { throw "PATH chua co $dir" }
+      - name: Reinstall is idempotent
+        run: |
+          irm https://github.com/${{ github.repository }}/releases/latest/download/install.ps1 | iex
+          $dir = Join-Path $env:LOCALAPPDATA "pingstable"
+          $count = ([Environment]::GetEnvironmentVariable("Path", "User") -split ";" | Where-Object { $_ -eq $dir }).Count
+          if ($count -ne 1) { throw "PATH bi them $count lan" }

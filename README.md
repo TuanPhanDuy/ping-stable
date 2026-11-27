@@ -18,7 +18,7 @@ curl -fsSL https://github.com/TuanPhanDuy/ping-stable/releases/latest/download/i
 irm https://github.com/TuanPhanDuy/ping-stable/releases/latest/download/install.ps1 | iex
 ```
 
-Muốn cài một phiên bản cụ thể: đặt biến môi trường `PINGSTABLE_VERSION=v0.1.0` trước khi chạy lệnh cài.
+Hướng dẫn chi tiết (cài thủ công, cập nhật, gỡ cài đặt, cảnh báo của Windows Defender, lỗi thường gặp): xem [INSTALL.md](INSTALL.md).
 
 ## Cách dùng
 
