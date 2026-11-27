@@ -27,7 +27,8 @@ jobs:
           "$bin" wifi --count 2
           "$bin" monitor --target 127.0.0.1 --duration 2
           "$bin" compare --target 127.0.0.1 --seconds 2 < /dev/null
-          grep -F '.local/bin' ~/.zshrc
+          # Installer chỉ sửa ~/.zshrc khi ~/.local/bin chưa có trong PATH.
+          case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) grep -F '.local/bin' ~/.zshrc ;; esac
 
   windows:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'

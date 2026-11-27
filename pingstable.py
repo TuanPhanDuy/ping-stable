@@ -271,7 +271,7 @@ def cmd_wifi(a):
     if IS_MAC:
         print("Dùng mạng nhiều nhất:", ", ".join(f"{name} {rate / 1e3:.0f}KB/s" for rate, name in talkers) or "-")
     print("\nKết luận:")
-    for i in wifi_issues(info, gw, talkers) or ["Wi-Fi ổn."]:
+    for i in wifi_issues(info, gw, talkers) or ["Wi-Fi ổn." if info else "Không có dữ liệu Wi-Fi để kết luận."]:
         print(f"  - {i}")
 
 
